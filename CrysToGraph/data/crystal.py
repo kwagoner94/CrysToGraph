@@ -12,6 +12,15 @@ import random
 
 from pymatgen.core import Lattice, Structure, Molecule
 from pymatgen.io.cif import CifParser
+try:
+    from pymatgen.io.ase import AseAtomsAdaptor
+except ImportError:  # pragma: no cover - optional dependency
+    AseAtomsAdaptor = None
+
+try:  # pragma: no cover - optional dependency
+    from ase import Atoms as ASEAtoms
+except ImportError:  # pragma: no cover - optional dependency
+    ASEAtoms = None
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -23,9 +32,34 @@ from .graph_utils import prepare_line_graph_batch
 from .graph_utils import compute_bond_cosines, detect_radius, convert_spherical
     
     
+def _ensure_structure(structure):
+    """Return a pymatgen ``Structure`` instance from supported inputs."""
+    if structure is None:
+        return None
+
+    if isinstance(structure, Structure):
+        return structure
+
+    if isinstance(structure, Molecule):
+        raise TypeError('Molecule objects are not supported as crystal structures.')
+
+    if isinstance(structure, dict):
+        return Structure.from_dict(structure)
+
+    if ASEAtoms is not None and isinstance(structure, ASEAtoms):
+        if AseAtomsAdaptor is None:
+            raise ImportError('pymatgen.io.ase.AseAtomsAdaptor is required to convert ASE Atoms.')
+        return AseAtomsAdaptor.get_structure(structure)
+
+    raise TypeError(
+        'Unsupported structure type "{}". Expected pymatgen Structure or ASE Atoms.'
+        .format(type(structure))
+    )
+
+
 class Crystal:
     def __init__(self,
-                 structure=None, 
+                 structure=None,
                  idx=None, 
                  mpid=None,
                  exfoliable_2d=False, 
@@ -33,6 +67,8 @@ class Crystal:
                  target=None, 
                  atom_vocab=None,
                  min_atoms=1):
+        if structure is not None:
+            structure = _ensure_structure(structure)
         self.structure = structure
         self.idx = idx
         self.mpid = mpid
@@ -43,7 +79,7 @@ class Crystal:
         self.graph = None
         self._masked = False
         self.min_atoms = min_atoms
-        if len(structure) < self.min_atoms:
+        if self.structure is not None and len(self.structure) < self.min_atoms:
             self.structure.make_supercell((2, 2, 2))
     
     def define(self,
@@ -54,9 +90,10 @@ class Crystal:
                dimension=None,
                target=None, 
                atom_vocab=None):
-        if structure is not None: 
+        if structure is not None:
+            structure = _ensure_structure(structure)
             self.structure = structure
-            if len(structure) < self.min_atoms:
+            if len(self.structure) < self.min_atoms:
                 self.structure.make_supercell((2, 2, 2))
             print('structure updated')
         if idx is not None: 
@@ -531,6 +568,8 @@ def structure2dglgraph(structure, atom_vocab, embedding=False, max_nbr=12, max_r
     """
     dgl graph object
     """
+    structure = _ensure_structure(structure)
+
     if embedding:
         atom_emb = torch.vstack([atom_vocab.get_atom_embedding(structure[i].specie.number)
                                 for i in range(len(structure))])  # torch_geometric
