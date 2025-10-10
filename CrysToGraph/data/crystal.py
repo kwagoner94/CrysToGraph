@@ -326,9 +326,13 @@ class ProcessedDGLCrystalDataset(torch.utils.data.Dataset):
         self.embedded = embedded
         self.prepare_batch = prepare_line_graph_batch
         self.load_data = False
+        self.direction_vectors = None
+        self.direction_key = None
+        self._direction_normalized = False
+        self._use_direction_features = True
         if load_data:
             self.load_all_data()
-        
+
         super().__init__()
         
     @property
@@ -346,6 +350,70 @@ class ProcessedDGLCrystalDataset(torch.utils.data.Dataset):
         
     def set_atom_vocab(self, atom_vocab=None):
         self.atom_vocab = atom_vocab
+
+    def set_directional_features(self, direction_vectors, key='direction', normalize=False):
+        """Attach per-structure directional descriptors.
+
+        Parameters
+        ----------
+        direction_vectors : Sequence
+            A list/array-like collection whose ``i``-th element encodes the
+            directional information (e.g. ``[x, y, z]``) for structure ``i``.
+        key : str, optional
+            Name under which the broadcast node feature will be stored.  The
+            same key is later consumed by the neural network module.
+        normalize : bool, optional
+            If ``True`` each vector is rescaled to unit length prior to being
+            attached to the graphs.  This is handy when you only care about the
+            direction and not the magnitude.
+        """
+
+        vectors = torch.as_tensor(direction_vectors, dtype=torch.float32)
+        if vectors.dim() == 1:
+            vectors = vectors.unsqueeze(-1)
+        if vectors.shape[0] != self.length:
+            raise ValueError(
+                'Expected {} directional vectors, got {}.'.format(
+                    self.length, vectors.shape[0]))
+
+        if normalize:
+            norms = torch.norm(vectors, dim=-1, keepdim=True).clamp_min(1e-12)
+            vectors = vectors / norms
+            self._direction_normalized = True
+        else:
+            self._direction_normalized = False
+
+        self.direction_vectors = vectors
+        self.direction_key = key
+
+    def enable_directional_features(self, enabled=True):
+        """Toggle whether stored direction vectors should be attached."""
+
+        self._use_direction_features = bool(enabled)
+
+    def _attach_direction_to_graph(self, idx, graph):
+        if self.direction_vectors is None or not self._use_direction_features:
+            return graph
+
+        vector = self.direction_vectors[idx]
+        if vector.dim() == 0:
+            vector = vector.unsqueeze(0)
+        if vector.dim() == 1:
+            vector = vector.unsqueeze(0)
+        feat = vector.float()
+
+        def _inject(g):
+            expanded = feat.expand(g.num_nodes(), feat.shape[-1]).clone().requires_grad_(False)
+            g.ndata[self.direction_key] = expanded
+            setattr(g, self.direction_key, feat.squeeze(0))
+            return g
+
+        if isinstance(graph, tuple):
+            g, lg = graph
+            g = _inject(g)
+            return g, lg
+
+        return _inject(graph)
     
     def __len__(self):
         return self.length    
@@ -405,6 +473,8 @@ class ProcessedDGLCrystalDataset(torch.utils.data.Dataset):
         else:
             xt = self.get_crystal(idx)
             graph = xt.graph
+
+        graph = self._attach_direction_to_graph(idx, graph)
 
         if not self.masked_labels:
             label = self.labels_list[idx]
@@ -497,6 +567,7 @@ class ProcessedCrystalDatasetContrastive(ProcessedDGLCrystalDataset):
             self.load_all_data()
 
         super().__init__(root, atom_vocab, '', names, embedded, raw_dir, processed_dir, False)
+        self.enable_directional_features(False)
 
     def __getitem__(self, idx):
         if self.load_data:
@@ -504,14 +575,17 @@ class ProcessedCrystalDatasetContrastive(ProcessedDGLCrystalDataset):
         else:
             xt = self.get_crystal(idx, suffix=self.suffix)
             graph = xt.graph
+        graph = self._attach_direction_to_graph(idx, graph)
         graphs = [graph]
 
         if self.random:
-            graphs.append(self.get_crystal(idx,
-                                           suffix=self.suffixes[random.randint(1, len(self.suffixes)-1)]).graph)
+            rand_graph = self.get_crystal(idx,
+                                          suffix=self.suffixes[random.randint(1, len(self.suffixes)-1)]).graph
+            graphs.append(self._attach_direction_to_graph(idx, rand_graph))
         else:
             for i in range(1, len(self.suffixes)):
-                graphs.append(self.get_crystal(idx, suffix=self.suffixes[i]).graph)
+                aug_graph = self.get_crystal(idx, suffix=self.suffixes[i]).graph
+                graphs.append(self._attach_direction_to_graph(idx, aug_graph))
 
         return graphs
 
