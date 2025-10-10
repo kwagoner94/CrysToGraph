@@ -194,7 +194,8 @@ class Finetuning(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, line_fea_len=30, n_conv=3, h_fea_len=128, n_fc=3, n_gt=1,
-                 embeddings=None, module=None, norm=False, drop=0.0):
+                 embeddings=None, module=None, norm=False, drop=0.0,
+                 direction_dim=0, direction_key='direction'):
         super(Finetuning, self).__init__()
         self.embeddings = embeddings
         self.embedded = True
@@ -240,6 +241,11 @@ class Finetuning(nn.Module):
             for _ in range(n_fc-1)])
         self.fc_out = nn.Linear(h_fea_len, 1, bias=True)
         self.fin_sp = nn.Softplus()
+
+        self.direction_dim = direction_dim
+        self.direction_key = direction_key
+        if self.direction_dim > 0:
+            self.direction_encoder = nn.Linear(self.direction_dim, h_fea_len)
 
         if norm:
             self.ln_fc = nn.LayerNorm(h_fea_len)
@@ -289,6 +295,13 @@ class Finetuning(nn.Module):
         
         crys_fea = self.conv_to_fc_softplus(crys_fea)
         crys_fea = self.conv_to_fc(crys_fea)
+
+        if self.direction_dim > 0 and self.direction_key in data[0].ndata:
+            direction = data[0].ndata[self.direction_key]
+            direction = tgnn.pool.global_mean_pool(direction, crystal_atom_idx.cuda())
+            direction = self.direction_encoder(direction)
+            crys_fea = crys_fea + direction
+
         if hasattr(self, 'bn'): crys_fea = self.ln_fc(crys_fea)
 
         for fc, sp in zip(self.fcs, self.softpluses):
